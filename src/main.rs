@@ -11,7 +11,7 @@ mod volume;
 use anyhow::{bail, Context, Result};
 use config::{Config, Mode, USAGE};
 use ffmpeg::{AudioPlan, ColorInfo, Decode, EncodeParams};
-use geometry::{depth_kept, fmt_mat, is_planar, output_dims, planar_xy, rotation_matrix, time_reversed, Mat3};
+use geometry::{depth_kept, fmt_mat, is_planar, output_dims, planar_xy, rotation_matrix, time_reversed, tracked_output, Mat3, Track};
 use pixfmt::PixelFormat;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -93,7 +93,7 @@ impl Job<'_> {
 
     fn encode_cmd(&self, w: usize, h: usize, plan: Option<&AudioPlan>) -> Vec<String> {
         if w > 8192 || h > 8192 {
-            log!(self.cfg, "warning: output {w}x{h} exceeds 8192 px; the encoder may refuse it (ROT_OUTPUT=crop or FF_VF=scale=... shrink it)");
+            log!(self.cfg, "warning: output {w}x{h} exceeds 8192 px; the encoder may refuse it (ROT_CROP=1, ROT_OUTPUT=crop or FF_VF=scale=... shrink it)");
         }
         let audio = self.audio.as_ref().zip(plan).map(|((p, _), plan)| (p.as_path(), plan));
         ffmpeg::encode_cmd(
@@ -111,19 +111,41 @@ impl Job<'_> {
         )
     }
 
-    fn out_dims(&self, in_dims: [usize; 3]) -> [usize; 3] {
-        output_dims(&self.rot, in_dims, self.cfg.output, self.cfg.even_dims)
+    fn out_dims(&self, in_dims: [usize; 3]) -> ([usize; 3], Track) {
+        if self.cfg.crop {
+            tracked_output(&self.rot, in_dims, self.cfg.output, self.cfg.even_dims)
+        } else {
+            (output_dims(&self.rot, in_dims, self.cfg.output, self.cfg.even_dims), Track::default())
+        }
+    }
+
+    fn describe_window(&self, in_dims: [usize; 3], out: [usize; 3], track: &Track) -> Option<String> {
+        if !self.cfg.crop {
+            return None;
+        }
+        let full = output_dims(&self.rot, in_dims, self.cfg.output, self.cfg.even_dims);
+        if full[..2] == out[..2] {
+            return None;
+        }
+        Some(if track.is_static() {
+            format!("window: {}x{} centred (full box {}x{})", out[0], out[1], full[0], full[1])
+        } else {
+            format!("window: {}x{} follows content, centre moves ({:+.3}, {:+.3}) px/frame (full box {}x{})", out[0], out[1], track.vel[0], track.vel[1], full[0], full[1])
+        })
     }
 
     fn run_volume<F: Frames>(&self, frames: &F, in_dims: [usize; 3]) -> Result<(u64, u64)> {
-        let out = self.out_dims(in_dims);
+        let (out, track) = self.out_dims(in_dims);
         log!(self.cfg, "volume: {}x{}x{} -> {}x{}x{}", in_dims[0], in_dims[1], in_dims[2], out[0], out[1], out[2]);
+        if let Some(w) = self.describe_window(in_dims, out, &track) {
+            log!(self.cfg, "{w}");
+        }
         let plan = self.audio_plan(Some(in_dims[2]), Some(out[2]));
         if let Some(p) = &plan {
             log!(self.cfg, "audio: {}", describe_audio(p));
         }
         let enc = self.encode_cmd(out[0], out[1], plan.as_ref());
-        let n = pipeline::run_volume(self.cfg, self.pf, &self.rot, in_dims, out, self.fill.clone(), frames, &enc)?;
+        let n = pipeline::run_volume(self.cfg, self.pf, &self.rot, in_dims, out, track, self.fill.clone(), frames, &enc)?;
         Ok((in_dims[2] as u64, n))
     }
 }
@@ -338,15 +360,19 @@ fn run(a: &[String]) -> Result<()> {
             println!("# audio dump\n{}", shell_join(c));
         }
         let d_est = plan.frames.unwrap_or(1);
-        let (out, in_frames, out_frames) = if mode == Mode::Stream {
+        let (out, in_frames, out_frames, window) = if mode == Mode::Stream {
             let rxy = planar_xy(&rot);
-            (output_dims(&rxy, [cw, ch, 1], cfg.output, cfg.even_dims), in_frames_known, in_frames_known)
+            (output_dims(&rxy, [cw, ch, 1], cfg.output, cfg.even_dims), in_frames_known, in_frames_known, None)
         } else {
-            let o = job.out_dims([cw, ch, d_est]);
-            (o, Some(d_est), Some(o[2]))
+            let (o, track) = job.out_dims([cw, ch, d_est]);
+            let window = job.describe_window([cw, ch, d_est], o, &track);
+            (o, Some(d_est), Some(o[2]), window)
         };
         let aplan = job.audio_plan(in_frames, out_frames);
         println!("# encode {}x{}{}", out[0], out[1], if mode == Mode::Stream { String::new() } else { format!("x{} (from {}x{}x{})", out[2], cw, ch, d_est) });
+        if let Some(w) = window {
+            println!("# {w}");
+        }
         if let Some(p) = &aplan {
             println!("# audio: {}", describe_audio(p));
         }

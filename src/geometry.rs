@@ -192,6 +192,141 @@ pub fn output_dims(r: &Mat3, in_dims: [usize; 3], spec: OutputSize, even: bool) 
     out
 }
 
+/// Output window that follows the content: its centre (in luma pixels, relative to the centre of the
+/// rotated volume) at output frame z is `pos + vel * (z + 0.5 - zc)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Track {
+    pub pos: [f64; 2],
+    pub vel: [f64; 2],
+    pub zc: f64,
+}
+
+impl Track {
+    pub fn center(&self, z: f64) -> [f64; 2] {
+        let t = z + 0.5 - self.zc;
+        [self.pos[0] + self.vel[0] * t, self.pos[1] + self.vel[1] * t]
+    }
+
+    pub fn is_static(&self) -> bool {
+        self.vel == [0.0, 0.0]
+    }
+}
+
+/// XY bounding box of the slice of the rotated input box at output depth `z` (coordinates relative
+/// to the rotated volume's centre), or None when the plane misses the box.
+fn slice_bbox(r: &Mat3, in_dims: [usize; 3], z: f64) -> Option<[f64; 4]> {
+    let half = [in_dims[0] as f64 / 2.0, in_dims[1] as f64 / 2.0, in_dims[2] as f64 / 2.0];
+    let corner = |i: usize| {
+        let v = [
+            if i & 1 == 0 { -half[0] } else { half[0] },
+            if i & 2 == 0 { -half[1] } else { half[1] },
+            if i & 4 == 0 { -half[2] } else { half[2] },
+        ];
+        mat_vec(r, v)
+    };
+    let mut bb = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
+    let mut add = |p: [f64; 3]| {
+        bb[0] = bb[0].min(p[0]);
+        bb[1] = bb[1].max(p[0]);
+        bb[2] = bb[2].min(p[1]);
+        bb[3] = bb[3].max(p[1]);
+    };
+    for i in 0..8 {
+        for bit in [1, 2, 4] {
+            if i & bit != 0 {
+                continue;
+            }
+            let (a, b) = (corner(i), corner(i | bit));
+            let (da, db) = (a[2] - z, b[2] - z);
+            if da * db > 0.0 {
+                continue;
+            }
+            if da == db {
+                add(a);
+                add(b);
+            } else {
+                let t = da / (da - db);
+                add([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), z]);
+            }
+        }
+    }
+    bb[0].is_finite().then_some(bb)
+}
+
+/// Output size and window path when the window follows the content instead of covering the whole
+/// bounding box. Per axis the window centre moves linearly along the candidate line (static, the
+/// projected input axes — the corridor axis for a tilted video — or the least-squares fit through the
+/// slice centres) that gives the smallest extent containing every slice; the full box is used where
+/// no candidate is smaller.
+pub fn tracked_output(r: &Mat3, in_dims: [usize; 3], spec: OutputSize, even: bool) -> ([usize; 3], Track) {
+    let base = output_dims(r, in_dims, spec, even);
+    let fit = fit_dims(r, in_dims);
+    let depth = base[2];
+    let zc = depth as f64 / 2.0;
+    let slices: Vec<(f64, [f64; 4])> =
+        (0..depth).filter_map(|k| slice_bbox(r, in_dims, k as f64 + 0.5 - zc).map(|bb| (k as f64 + 0.5 - zc, bb))).collect();
+    let mut track = Track { zc, ..Default::default() };
+    let mut size = [fit[0] as f64, fit[1] as f64];
+    if !slices.is_empty() {
+        let n = slices.len() as f64;
+        let tm = slices.iter().map(|(t, _)| t).sum::<f64>() / n;
+        let stt: f64 = slices.iter().map(|(t, _)| (t - tm) * (t - tm)).sum();
+        let snap = |v: f64| if v.abs() < 1e-9 { 0.0 } else { v };
+        for a in 0..2 {
+            let c = |bb: &[f64; 4]| (bb[2 * a] + bb[2 * a + 1]) / 2.0;
+            let cm = slices.iter().map(|(_, bb)| c(bb)).sum::<f64>() / n;
+            let ls_vel = if stt > 0.0 { slices.iter().map(|(t, bb)| (t - tm) * (c(bb) - cm)).sum::<f64>() / stt } else { 0.0 };
+            // (pos, vel) candidates: static, input axes through the centre, least squares
+            let mut lines = vec![(0.0, 0.0)];
+            lines.extend((0..3).filter(|&j| r[2][j].abs() > 1e-9).map(|j| (0.0, r[a][j] / r[2][j])));
+            lines.push((cm - ls_vel * tm, ls_vel));
+            let mut best: Option<(f64, f64, f64)> = None;
+            for (pos, vel) in lines {
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                for (t, bb) in &slices {
+                    let center = pos + vel * t;
+                    lo = lo.min(bb[2 * a] - center);
+                    hi = hi.max(bb[2 * a + 1] - center);
+                }
+                let extent = (hi - lo - 1e-6).ceil().max(1.0);
+                if best.is_none_or(|b| extent < b.0) {
+                    best = Some((extent, pos + (hi + lo) / 2.0, vel));
+                }
+            }
+            if let Some((extent, pos, vel)) = best {
+                if extent < fit[a] as f64 {
+                    size[a] = extent;
+                    track.pos[a] = snap(pos);
+                    track.vel[a] = snap(vel);
+                }
+            }
+        }
+    }
+    let mut out = base;
+    let tracked_dim = |a: usize| {
+        let mut d = size[a] as usize;
+        if even {
+            d += d % 2;
+        }
+        d
+    };
+    match spec {
+        OutputSize::Fit => {
+            out[0] = tracked_dim(0);
+            out[1] = tracked_dim(1);
+        }
+        OutputSize::Crop => {}
+        OutputSize::Custom(sp) => {
+            for a in 0..2 {
+                if sp[a] == DimSpec::Fit {
+                    out[a] = tracked_dim(a);
+                }
+            }
+        }
+    }
+    (out, track)
+}
+
 /// Maps output voxel centers of one plane to continuous input coordinates of the same plane.
 #[derive(Clone, Debug)]
 pub struct Geometry {
@@ -201,16 +336,18 @@ pub struct Geometry {
     pub inv: Mat3,
     pub in_center: [f64; 3],
     pub out_center: [f64; 3],
+    /// Window path in plane units.
+    pub track: Track,
 }
 
 impl Geometry {
     #[cfg(test)]
     pub fn new(rot: Mat3, in_dims: [usize; 3], out_dims: [usize; 3]) -> Self {
-        Self::plane(&rot, in_dims, out_dims, 0, 0)
+        Self::plane(&rot, in_dims, out_dims, Track::default(), 0, 0)
     }
 
-    /// Geometry of a plane subsampled by 2^sx x 2^sy; dims are full-resolution (luma) dims.
-    pub fn plane(rot: &Mat3, in_dims: [usize; 3], out_dims: [usize; 3], sx: u8, sy: u8) -> Self {
+    /// Geometry of a plane subsampled by 2^sx x 2^sy; dims and track are full-resolution (luma) values.
+    pub fn plane(rot: &Mat3, in_dims: [usize; 3], out_dims: [usize; 3], track: Track, sx: u8, sy: u8) -> Self {
         let s = [(1u32 << sx) as f64, (1u32 << sy) as f64, 1.0];
         let rt = transpose(rot);
         let mut inv = [[0.0; 3]; 3];
@@ -221,14 +358,20 @@ impl Geometry {
         }
         let pd = |d: [usize; 3]| [(d[0] + (1 << sx) - 1) >> sx, (d[1] + (1 << sy) - 1) >> sy, d[2]];
         let c = |d: [usize; 3]| [d[0] as f64 / 2.0 / s[0], d[1] as f64 / 2.0 / s[1], d[2] as f64 / 2.0];
-        Geometry { in_dims: pd(in_dims), out_dims: pd(out_dims), inv, in_center: c(in_dims), out_center: c(out_dims) }
+        let track = Track {
+            pos: [track.pos[0] / s[0], track.pos[1] / s[1]],
+            vel: [track.vel[0] / s[0], track.vel[1] / s[1]],
+            zc: track.zc,
+        };
+        Geometry { in_dims: pd(in_dims), out_dims: pd(out_dims), inv, in_center: c(in_dims), out_center: c(out_dims), track }
     }
 
     /// Continuous input coordinate of the center of output voxel (x, y, z).
     pub fn map(&self, x: f64, y: f64, z: f64) -> [f64; 3] {
+        let w = self.track.center(z);
         let p = [
-            x + 0.5 - self.out_center[0],
-            y + 0.5 - self.out_center[1],
+            x + 0.5 - self.out_center[0] + w[0],
+            y + 0.5 - self.out_center[1] + w[1],
             z + 0.5 - self.out_center[2],
         ];
         let q = mat_vec(&self.inv, p);
@@ -353,7 +496,7 @@ mod tests {
     fn subsampled_plane_geometry() {
         let r = rotation_matrix([0.0, 0.0, 90.0], XYZ);
         let luma = Geometry::new(r, [8, 6, 2], [6, 8, 2]);
-        let chroma = Geometry::plane(&r, [8, 6, 2], [6, 8, 2], 1, 1);
+        let chroma = Geometry::plane(&r, [8, 6, 2], [6, 8, 2], Track::default(), 1, 1);
         assert_eq!(chroma.in_dims, [4, 3, 2]);
         assert_eq!(chroma.out_dims, [3, 4, 2]);
         for (x, y, z) in [(0usize, 0usize, 0usize), (2, 3, 1), (1, 2, 0)] {
@@ -361,8 +504,115 @@ mod tests {
             let c = chroma.map(x as f64, y as f64, z as f64);
             assert!(approx(c, [q[0] / 2.0, q[1] / 2.0, q[2]]), "{c:?} vs {q:?}");
         }
-        let odd = Geometry::plane(&r, [5, 3, 1], [3, 5, 1], 1, 1);
+        let odd = Geometry::plane(&r, [5, 3, 1], [3, 5, 1], Track::default(), 1, 1);
         assert_eq!(odd.in_dims, [3, 2, 1]);
         assert!(approx(odd.in_center, [1.25, 0.75, 0.5]));
+    }
+
+    /// True when every output voxel that maps inside the input lies inside the tracked window.
+    fn window_contains_content(r: &Mat3, in_dims: [usize; 3], out: [usize; 3], track: Track) -> bool {
+        let full = fit_dims(r, in_dims);
+        let g = Geometry::plane(r, in_dims, full, Track::default(), 0, 0);
+        let w = Geometry::plane(r, in_dims, out, track, 0, 0);
+        let inside = |p: [f64; 3]| (0..3).all(|i| p[i] >= 0.0 && p[i] <= in_dims[i] as f64);
+        for z in 0..full[2] {
+            let c = track.center(z as f64);
+            let (ox, oy) = (full[0] as f64 / 2.0 - out[0] as f64 / 2.0 + c[0], full[1] as f64 / 2.0 - out[1] as f64 / 2.0 + c[1]);
+            for y in 0..full[1] {
+                for x in 0..full[0] {
+                    if !inside(g.map(x as f64, y as f64, z as f64)) {
+                        continue;
+                    }
+                    let (wx, wy) = (x as f64 - ox, y as f64 - oy);
+                    if wx < -0.5 || wy < -0.5 || wx > out[0] as f64 - 0.5 || wy > out[1] as f64 - 0.5 {
+                        return false;
+                    }
+                    if !approx(w.map(wx, wy, z as f64), g.map(x as f64, y as f64, z as f64)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn tracked_identity_and_planar_equal_fit() {
+        for deg in [[0.0, 0.0, 0.0], [0.0, 0.0, 90.0], [180.0, 0.0, 30.0]] {
+            let r = rotation_matrix(deg, XYZ);
+            let (out, track) = tracked_output(&r, [16, 10, 6], OutputSize::Fit, false);
+            assert_eq!(out, output_dims(&r, [16, 10, 6], OutputSize::Fit, false), "{deg:?}");
+            assert_eq!(track, Track { zc: out[2] as f64 / 2.0, ..Default::default() }, "{deg:?}");
+        }
+    }
+
+    #[test]
+    fn tracked_corridor_shrinks_and_moves() {
+        let r = rotation_matrix([10.0, 0.0, 0.0], XYZ);
+        let dims = [4, 6, 60];
+        let full = output_dims(&r, dims, OutputSize::Fit, false);
+        let (out, track) = tracked_output(&r, dims, OutputSize::Fit, false);
+        assert_eq!(out[0], full[0]);
+        assert_eq!(out[2], full[2]);
+        assert!(out[1] < full[1], "{out:?} vs {full:?}");
+        assert!(out[1] <= 8, "{out:?}");
+        assert_eq!(track.vel[0], 0.0);
+        assert!((track.vel[1].abs() - (10f64).to_radians().tan()).abs() < 0.02, "{track:?}");
+        assert!(window_contains_content(&r, dims, out, track));
+        let (even, _) = tracked_output(&r, dims, OutputSize::Fit, true);
+        assert_eq!(even[1] % 2, 0);
+    }
+
+    #[test]
+    fn tracked_symmetric_cube_is_static_fit() {
+        let r = rotation_matrix([45.0, 0.0, 0.0], XYZ);
+        let dims = [8, 8, 8];
+        let (out, track) = tracked_output(&r, dims, OutputSize::Fit, false);
+        let full = output_dims(&r, dims, OutputSize::Fit, false);
+        assert_eq!([out[0], out[2]], [full[0], full[2]]);
+        assert!(out[1] + 1 >= full[1] && out[1] <= full[1], "{out:?} vs {full:?}");
+        assert!(track.is_static());
+        assert_eq!(track.pos, [0.0, 0.0]);
+        assert!(window_contains_content(&r, dims, out, track));
+        let r = rotation_matrix([30.0, 40.0, 60.0], XYZ);
+        let (out, track) = tracked_output(&r, [7, 9, 11], OutputSize::Fit, false);
+        assert!(window_contains_content(&r, [7, 9, 11], out, track));
+    }
+
+    #[test]
+    fn tracked_short_volume_follows_axis() {
+        let r = rotation_matrix([10.0, -5.0, 0.0], XYZ);
+        let dims = [160, 90, 60];
+        let full = output_dims(&r, dims, OutputSize::Fit, true);
+        let (out, track) = tracked_output(&r, dims, OutputSize::Fit, true);
+        assert!(out[1] < full[1], "{out:?} vs {full:?}");
+        assert!(out[1] <= 94, "{out:?}");
+        assert!((track.vel[1] - r[1][2] / r[2][2]).abs() < 1e-9, "{track:?}");
+        assert!(window_contains_content(&r, dims, out, track));
+    }
+
+    #[test]
+    fn tracked_respects_output_spec() {
+        let r = rotation_matrix([10.0, 0.0, 0.0], XYZ);
+        let dims = [4, 6, 60];
+        assert_eq!(tracked_output(&r, dims, OutputSize::Crop, false).0, dims);
+        let c = parse_output_size("0x20x0").unwrap();
+        let (out, _) = tracked_output(&r, dims, c, false);
+        assert_eq!(out[1], 20);
+        assert_eq!(out[0], tracked_output(&r, dims, OutputSize::Fit, false).0[0]);
+    }
+
+    #[test]
+    fn tracked_plane_scales_offsets() {
+        let r = rotation_matrix([10.0, 0.0, 0.0], XYZ);
+        let dims = [8, 6, 40];
+        let (out, track) = tracked_output(&r, dims, OutputSize::Fit, true);
+        let luma = Geometry::plane(&r, dims, out, track, 0, 0);
+        let chroma = Geometry::plane(&r, dims, out, track, 1, 1);
+        for (x, y, z) in [(0usize, 0usize, 0usize), (1, 1, 7), (2, 1, 30)] {
+            let q = luma.map(2.0 * x as f64 + 0.5, 2.0 * y as f64 + 0.5, z as f64);
+            let c = chroma.map(x as f64, y as f64, z as f64);
+            assert!(approx(c, [q[0] / 2.0, q[1] / 2.0, q[2]]), "{c:?} vs {q:?}");
+        }
     }
 }

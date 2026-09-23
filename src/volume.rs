@@ -1,6 +1,6 @@
 //! Volume sampling: every output voxel is inverse-mapped into the input volume, plane by plane.
 
-use crate::geometry::{Geometry, Mat3};
+use crate::geometry::{Geometry, Mat3, Track};
 use crate::pixfmt::{PixelFormat, Region};
 use anyhow::{bail, Result};
 use rayon::prelude::*;
@@ -93,18 +93,20 @@ pub struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pf: &'a PixelFormat,
         rot: &Mat3,
         in_dims: [usize; 3],
         out_dims: [usize; 3],
+        track: Track,
         interp: Interp,
         fill: Vec<Vec<u8>>,
     ) -> Self {
         assert_eq!(fill.len(), pf.planes.len());
         Renderer {
             pf,
-            geoms: pf.planes.iter().map(|p| Geometry::plane(rot, in_dims, out_dims, p.sx, p.sy)).collect(),
+            geoms: pf.planes.iter().map(|p| Geometry::plane(rot, in_dims, out_dims, track, p.sx, p.sy)).collect(),
             in_planes: pf.layout(in_dims[0], in_dims[1]),
             out_planes: pf.layout(out_dims[0], out_dims[1]),
             interp,
@@ -317,7 +319,7 @@ mod tests {
         let pf = PixelFormat::parse("rgb24").unwrap();
         let r = rotation_matrix(deg, XYZ);
         let out_dims = output_dims(&r, [W, H, D], size, false);
-        let rd = Renderer::new(&pf, &r, [W, H, D], out_dims, interp, pf.fill("0", false).unwrap());
+        let rd = Renderer::new(&pf, &r, [W, H, D], out_dims, Track::default(), interp, pf.fill("0", false).unwrap());
         let vol = volume();
         let frames = Flat { data: &vol, frame_bytes: W * H * 3 };
         let fsz = rd.out_frame_bytes();
@@ -434,7 +436,7 @@ mod tests {
         let pf = PixelFormat::parse("yuv420p").unwrap();
         let r = rotation_matrix(deg, XYZ);
         let out_dims = output_dims(&r, [YW, YH, D], OutputSize::Fit, true);
-        let rd = Renderer::new(&pf, &r, [YW, YH, D], out_dims, interp, pf.fill("0", false).unwrap());
+        let rd = Renderer::new(&pf, &r, [YW, YH, D], out_dims, Track::default(), interp, pf.fill("0", false).unwrap());
         let frames: Vec<Vec<u8>> = (0..D).map(yuv_frame).collect();
         let out = (0..out_dims[2])
             .map(|z| {
@@ -500,7 +502,7 @@ mod tests {
         let r = rotation_matrix([0.0, 180.0, 0.0], XYZ);
         let (full, dims) = yuv_render([0.0, 180.0, 0.0], Interp::Trilinear);
         let r2 = planar_xy(&r);
-        let rd = Renderer::new(&pf, &r2, [YW, YH, 1], [dims[0], dims[1], 1], Interp::Trilinear, pf.fill("0", false).unwrap());
+        let rd = Renderer::new(&pf, &r2, [YW, YH, 1], [dims[0], dims[1], 1], Track::default(), Interp::Trilinear, pf.fill("0", false).unwrap());
         for z in 0..D {
             let src = yuv_frame(D - 1 - z);
             let mut o = vec![0u8; rd.out_frame_bytes()];
@@ -514,7 +516,7 @@ mod tests {
         let pf = PixelFormat::parse("yuv420p").unwrap();
         let r = rotation_matrix([0.0, 0.0, 45.0], XYZ);
         let out_dims = output_dims(&r, [YW, YH, D], OutputSize::Fit, true);
-        let rd = Renderer::new(&pf, &r, [YW, YH, D], out_dims, Interp::Nearest, pf.fill("0", false).unwrap());
+        let rd = Renderer::new(&pf, &r, [YW, YH, D], out_dims, Track::default(), Interp::Nearest, pf.fill("0", false).unwrap());
         let frames: Vec<Vec<u8>> = (0..D).map(yuv_frame).collect();
         let mut o = vec![0u8; rd.out_frame_bytes()];
         rd.render_frame(&frames, 0, &mut o);

@@ -53,6 +53,7 @@ pub struct Config {
     pub order: [Axis; 3],
     pub interp: Interp,
     pub output: OutputSize,
+    pub crop: bool,
     pub fill_spec: String,
     pub even_dims: bool,
     pub audio_mode: AudioMode,
@@ -176,6 +177,7 @@ impl Config {
             order: parse_order(&env_or("ROT_ORDER", "xyz"))?,
             interp: parse_interp(&env_or("ROT_INTERP", "trilinear"))?,
             output: parse_output_size(&env_or("ROT_OUTPUT", "fit"))?,
+            crop: env_bool("ROT_CROP", true)?,
             fill_spec: env_or("ROT_FILL", "0,0,0"),
             even_dims: env_bool("ROT_EVEN_DIMS", true)?,
             audio_mode,
@@ -279,6 +281,7 @@ Rotations follow the right-hand rule around each axis and are applied X, then Y,
   ROT_THREADS=N          worker threads (default: all CPU cores)
   ROT_INTERP=trilinear   trilinear | nearest
   ROT_OUTPUT=fit         fit (bounding box) | crop (input size) | WxHxD (0 = fit, -1 = input)
+  ROT_CROP=1             window follows the content (smallest moving WxH that contains every frame); 0 = full box
   ROT_ORDER=xyz          order in which the three rotations are applied
   ROT_FILL=0,0,0         fill for empty space: R,G,B[,A] | #RRGGBB[AA] | gray value
   ROT_EVEN_DIMS=1        round output width/height up to even values

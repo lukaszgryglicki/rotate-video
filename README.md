@@ -45,8 +45,13 @@ X, then Y, then Z (`ROT_ORDER`).
 | `rotatevideo in.mp4 out.mp4 30 40 60` | arbitrary 3D rotation, output is the bounding box |
 
 The output volume is the **bounding box** of the rotated input (nothing clipped, empty space black —
-`ROT_FILL`). `ROT_OUTPUT=crop` keeps the input size, `ROT_OUTPUT=WxHxD` sets it explicitly
-(`0` = fit, `-1` = input, per dimension).
+`ROT_FILL`). By default (`ROT_CROP=1`) the encoded frame is a **window that follows the content**: the
+smallest W×H that contains every frame's content when its centre moves at a constant speed. A slightly
+tilted video (`5 -5 2`) is a long tilted corridor whose bounding box is huge (thousands of pixels of
+black) while the corridor itself is barely larger than the input; the window stays ≈ W/cos θ × H/cos θ.
+It changes nothing for rotations where all frames cover the same area (multiples of 90°, pure Z).
+`ROT_CROP=0` encodes the whole bounding box. `ROT_OUTPUT=crop` keeps the input size, `ROT_OUTPUT=WxHxD`
+sets it explicitly (`0` = fit, `-1` = input, per dimension).
 
 `ROT_DRY_RUN=1` prints geometry, mode, sizes and the exact ffmpeg commands without processing anything.
 
@@ -110,6 +115,7 @@ spatial axis (e.g. `90 0 0`) the audio is simply rescaled to the new length.
 | `ROT_THREADS` | all cores | worker threads |
 | `ROT_INTERP` | `trilinear` | `trilinear` or `nearest` |
 | `ROT_OUTPUT` | `fit` | `fit`, `crop`, or `WxHxD` (`0` = fit, `-1` = input) |
+| `ROT_CROP` | `1` | window follows the content (smallest moving W×H containing every frame); `0` = full bounding box |
 | `ROT_ORDER` | `xyz` | order in which the rotations are applied |
 | `ROT_FILL` | `0,0,0` | fill colour: `R,G,B[,A]`, `#RRGGBB[AA]` or a gray value (converted to the yuv format) |
 | `ROT_EVEN_DIMS` | `1` | round output W/H up to even numbers (x265/x264 need them for 4:2:0) |
@@ -153,6 +159,8 @@ FF_IN_ARGS="-ss 00:06:00" rotatevideo in.mp4 out.mp4 0 180 0        # same, but 
 FF_IN_ARGS="-ss 00:06:00 -to 00:08:30" rotatevideo in.mp4 o.mp4 0 180 0   # 6:00-8:30 only
 ROT_CLIP=min rotatevideo in.mp4 cube.mp4 30 40 60          # 3D rotation of the central cube
 ROT_CLIP=min:end rotatevideo in.mp4 cube.mp4 30 40 60      # same cube, but from the last seconds of the video
+rotatevideo in.mp4 tilt.mp4 5 -5 2                         # whole video, slightly tilted in time; window follows the content
+ROT_CROP=0 rotatevideo in.mp4 tilt.mp4 5 -5 2              # same, full bounding box (thousands of px of black)
 ROT_CLIP=nth:50 rotatevideo in.mp4 fast.mp4 45 0 0         # every 50th frame, then tilt time into height
 ROT_CLIP=middle ROT_MODE=disk rotatevideo in.mp4 o.mp4 0 90 0
 FF_VCODEC=libx264 FF_VCODEC_ARGS="-crf 18" rotatevideo in.mp4 o.mp4 0 0 90

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::ffmpeg;
-use crate::geometry::Mat3;
+use crate::geometry::{Mat3, Track};
 use crate::pixfmt::PixelFormat;
 use crate::sys::check_interrupted;
 use crate::util::{fmt_bytes, shell_join, Progress};
@@ -311,11 +311,12 @@ pub fn run_volume<F: Frames>(
     rot: &Mat3,
     in_dims: [usize; 3],
     out_dims: [usize; 3],
+    track: Track,
     fill: Vec<Vec<u8>>,
     frames: &F,
     enc_cmd: &[String],
 ) -> Result<u64> {
-    let r = Renderer::new(pf, rot, in_dims, out_dims, cfg.interp, fill);
+    let r = Renderer::new(pf, rot, in_dims, out_dims, track, cfg.interp, fill);
     let mut sink = Sink::spawn(enc_cmd, r.out_frame_bytes())?;
     let mut progress = Progress::new("encode", Some(out_dims[2] as u64), cfg.quiet);
     for z in 0..out_dims[2] {
@@ -343,7 +344,7 @@ pub fn run_stream_forward(
     enc_cmd: &[String],
     total: Option<u64>,
 ) -> Result<(u64, u64)> {
-    let r = Renderer::new(pf, rot_xy, [in_wh[0], in_wh[1], 1], [out_wh[0], out_wh[1], 1], cfg.interp, fill);
+    let r = Renderer::new(pf, rot_xy, [in_wh[0], in_wh[1], 1], [out_wh[0], out_wh[1], 1], Track::default(), cfg.interp, fill);
     let in_bytes = r.in_frame_bytes();
     let mut src = Source::spawn(dec_cmd, in_bytes)?;
     let mut sink = Sink::spawn(enc_cmd, r.out_frame_bytes())?;
@@ -408,7 +409,7 @@ pub fn run_stream_reversed(
     enc_cmd: &[String],
     total: Option<u64>,
 ) -> Result<(u64, u64)> {
-    let r = Renderer::new(pf, rot_xy, [in_wh[0], in_wh[1], 1], [out_wh[0], out_wh[1], 1], cfg.interp, fill);
+    let r = Renderer::new(pf, rot_xy, [in_wh[0], in_wh[1], 1], [out_wh[0], out_wh[1], 1], Track::default(), cfg.interp, fill);
     let in_bytes = r.in_frame_bytes();
     let tmp_owned = tmp.to_path_buf();
     run_polling(seg_cmd, Progress::new("chunks", total, cfg.quiet), move || {
