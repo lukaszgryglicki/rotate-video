@@ -5,3 +5,4 @@ example_vids/
 *.mkv
 *.webm
 *.wav
+*.secret
