@@ -189,14 +189,20 @@ fn run(a: &[String]) -> Result<()> {
         if reversed { "reversed" } else { "forward" }
     );
 
-    let pix_fmt_name = if cfg.pix_fmt.eq_ignore_ascii_case("auto") {
+    let mut pix_fmt_name = if cfg.pix_fmt.eq_ignore_ascii_case("auto") {
         if PixelFormat::parse(&info.pix_fmt).is_ok() { info.pix_fmt.clone() } else { "rgb24".to_string() }
     } else {
         cfg.pix_fmt.clone()
     };
+    // ffmpeg >= 8 decodes the deprecated yuvj* formats as yuv* + full range
+    let mut color = info.color.clone();
+    if let Some(rest) = pix_fmt_name.strip_prefix("yuvj") {
+        pix_fmt_name = format!("yuv{rest}");
+        color.range = Some("pc".into());
+    }
     let pf = PixelFormat::parse(&pix_fmt_name)?;
-    let range = info.color.range.as_deref();
-    let full_range = range == Some("pc") || pix_fmt_name.starts_with("yuvj") || (pf.is_gray() && range != Some("tv"));
+    let range = color.range.as_deref();
+    let full_range = range == Some("pc") || (pf.is_gray() && range != Some("tv"));
     let fill = pf.fill(&cfg.fill_spec, full_range)?;
     let out_pix_fmt = if cfg.out_pix_fmt.eq_ignore_ascii_case("auto") { pf.encoder_default() } else { cfg.out_pix_fmt.clone() };
     let out_fps = cfg.out_fps.clone().unwrap_or_else(|| info.fps.clone());
@@ -310,7 +316,7 @@ fn run(a: &[String]) -> Result<()> {
         out_fps: out_fps.clone(),
         out_fps_f,
         out_pix_fmt,
-        color: &info.color,
+        color: &color,
         audio: has_audio.then(|| (audio_path.clone(), info.audio.as_ref().map(|a| a.sample_rate).unwrap_or(48000))),
         audio_reverse: cfg.audio_reverse.unwrap_or(reversed),
         in_fps_f: info.fps_f,
