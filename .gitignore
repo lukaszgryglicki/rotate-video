@@ -1,0 +1,7 @@
+/target
+rotatevideo-tmp-*
+example_vids/
+*.mp4
+*.mkv
+*.webm
+*.wav

@@ -1,0 +1,27 @@
+[package]
+name = "rotate-video"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rotate a video as a 3D volume (width x height x time) around the X, Y and Z axes"
+repository = "https://github.com/lukaszgryglicki/rotate-video"
+readme = "README.md"
+keywords = ["video", "ffmpeg", "rotation", "3d", "volume"]
+categories = ["multimedia::video", "command-line-utilities"]
+
+[[bin]]
+name = "rotatevideo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+rayon = "1"
+memmap2 = "0.9"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
