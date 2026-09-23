@@ -335,11 +335,29 @@ pub struct EncodeParams<'a> {
     pub color: &'a ColorInfo,
 }
 
+fn color_flags(c: &ColorInfo) -> Vec<String> {
+    let mut v = Vec::new();
+    for (flag, val) in [
+        ("-color_range", &c.range),
+        ("-colorspace", &c.space),
+        ("-color_primaries", &c.primaries),
+        ("-color_trc", &c.transfer),
+    ] {
+        if let Some(x) = val {
+            v.extend([flag.into(), x.clone()]);
+        }
+    }
+    v
+}
+
 pub fn encode_cmd(cfg: &Config, p: &EncodeParams) -> Vec<String> {
     let ext = p.output.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let d = encode_defaults(&ext);
     let mut v = base_cmd(cfg, true);
     v.extend(["-thread_queue_size".into(), "1024".into()]);
+    // tag the raw pipe with the input's color info: ffmpeg >= 7.1 otherwise range/matrix-converts
+    // untagged frames to whatever the output is tagged with (lossy)
+    v.extend(color_flags(p.color));
     v.extend(["-f".into(), "rawvideo".into(), "-pix_fmt".into(), p.pix_fmt.to_string()]);
     v.extend(["-video_size".into(), format!("{}x{}", p.width, p.height)]);
     v.extend(["-framerate".into(), p.out_fps.to_string(), "-i".into(), "pipe:0".into()]);
@@ -368,19 +386,7 @@ pub fn encode_cmd(cfg: &Config, p: &EncodeParams) -> Vec<String> {
     }
     match &cfg.color_args {
         Some(a) => v.extend(a.iter().cloned()),
-        None => {
-            let c = p.color;
-            for (flag, val) in [
-                ("-color_range", &c.range),
-                ("-colorspace", &c.space),
-                ("-color_primaries", &c.primaries),
-                ("-color_trc", &c.transfer),
-            ] {
-                if let Some(x) = val {
-                    v.extend([flag.into(), x.clone()]);
-                }
-            }
-        }
+        None => v.extend(color_flags(p.color)),
     }
     match &cfg.encode_args {
         Some(a) => v.extend(a.iter().cloned()),
@@ -517,7 +523,7 @@ mod tests {
             },
         );
         let s = shell_join(&cmd);
-        assert!(s.contains("-f rawvideo -pix_fmt yuv420p -video_size 640x480 -framerate 30000/1001 -i pipe:0"), "{s}");
+        assert!(s.contains("-color_range tv -colorspace bt709 -f rawvideo -pix_fmt yuv420p -video_size 640x480 -framerate 30000/1001 -i pipe:0"), "{s}");
         assert!(
             s.contains("-c:v libx265 -crf 16 -preset medium -x265-params log-level=error -pix_fmt yuv420p -color_range tv -colorspace bt709 -movflags +faststart -tag:v hvc1 -y out.mp4"),
             "{s}"

@@ -142,7 +142,7 @@ spatial axis (e.g. `90 0 0`) the audio is simply rescaled to the new length.
 | `FF_OUT_PIX_FMT` | `auto` | intermediate yuv format (10‑bit stays 10‑bit) or `yuv420p`; `none` = encoder's choice |
 | `FF_ACODEC` / `FF_ACODEC_ARGS` | `aac -b:a 192k` | `libopus` for webm, `libmp3lame` for avi |
 | `FF_AUDIO_FILTERS` | | extra audio filters appended to the generated chain |
-| `FF_COLOR_ARGS` | input tags | `-color_range/-colorspace/-color_primaries/-color_trc` copied from the input |
+| `FF_COLOR_ARGS` | input tags | output `-color_range/-colorspace/-color_primaries/-color_trc`, copied from the input; the raw frame pipe is always tagged with the input's values so ffmpeg never range/matrix-converts |
 | `FF_ENCODE_ARGS` | `-movflags +faststart -tag:v hvc1` (mp4/mov) | extra output args |
 
 ## Examples
